@@ -1,181 +1,183 @@
-# Orbinum Validator Ops
+# Orbinum Validator Node Setup
 
-Runbook and helper scripts for deploying and operating an **Orbinum Network**
-testnet validator node, based on the official docs:
+Adım adım Orbinum testnet validator kurulumu. Kaynak:
 https://docs.orbinum.network/validators/running-a-validator
 
-This repo does **not** replace `orbinum/node-deploy` (which holds the actual
-Compose file and chain spec) — it wraps it with scripts and checklists so the
-setup is repeatable and each step is verified before moving to the next one.
+Tüm komutları sırasıyla, bir önceki adımın çıktısını kontrol ederek çalıştır.
 
 ---
 
-## Prerequisites
+## Ön koşullar
 
-- A server meeting the [validator requirements](https://docs.orbinum.network/validators/requirements)
-- Docker + the Compose plugin ([install guide](https://docs.orbinum.network/nodes/installation))
-- No registry token needed — the validator image is public
-- A funded validator account (fund it from the [faucet](https://docs.orbinum.network/getting-started/faucet) before step 6)
+- [Validator requirements](https://docs.orbinum.network/validators/requirements)'ı karşılayan bir sunucu
+- Docker + Compose plugin ([kurulum](https://docs.orbinum.network/nodes/installation))
+- Registry token gerekmiyor, image public
 
 ---
 
-## Quick start
+## 1. `node-deploy`'i klonla ve yapılandır
 
 ```bash
-./scripts/01_clone_configure.sh      # clone node-deploy, copy .env.example
-# → edit node-deploy/testnet/validator/.env (see table below)
-./scripts/02_firewall.sh             # open 30333/tcp + 22/tcp only
-./scripts/03_start_node.sh           # docker compose pull && up -d
-./scripts/04_check_sync.sh           # poll system_health until isSyncing:false
-./scripts/05_generate_session_keys.sh <YOUR_SS58_ADDRESS>
-# → copy `keys` + `proof` from the output
-# → submit session.setKeys(keys, proof) manually in Polkadot.js Apps (step 6, no CLI path — see below)
-./scripts/07_verify_keystore.sh <KEYS_HEX_FROM_STEP_5>
+git clone https://github.com/orbinum/node-deploy.git
+cd node-deploy/testnet/validator
+cp .env.example .env
 ```
 
-Each script is a thin, checked wrapper around the exact commands in the docs —
-read them before running if you want to know exactly what they do.
+`.env` dosyasını aç ve şu değerleri düzenle:
+
+| Değişken | Değer | Neden |
+|---|---|---|
+| `VALIDATOR_NAME` | tanınabilir bir isim | Telemetry'de görünür |
+| `VALIDATOR_NODE_KEY` | `openssl rand -hex 32` çıktısı | Sabit libp2p kimliğin |
+| `TELEMETRY_URL` | varsayılanı bırak | Seviye `1`, validator adresini dashboard'a yayınlar |
+| `METRICS_BIND` | private IP'n, ya da `127.0.0.1` | Varsayılan kapalı gelir, dışa açık şey olmaz |
+| `PUBLIC_ADDR` | **boş bırak** | Node public adresini kendi bulur |
+| `RESERVED_NODES` | **boş bırak** | Eklemeli değil — kısmi liste node'u izole eder |
+| `SYNC_MODE` | **boş bırak** (bootstrap durumu hariç) | Full sync güvenli varsayılan |
+
+Node key üretmek için:
+```bash
+openssl rand -hex 32
+```
+
+Bootnode eklemene gerek yok — `testnet-spec.json` zaten hepsini içeriyor ve Compose dosyası zaten mount ediyor.
+
+> **Yeni bir sunucuda acele mi ediyorsun?** `SYNC_MODE=--sync warp` her bloğu tekrar oynatmayı atlar ama **sadece tamamen yeni bir volume'da** kullanılabilir ve node, sync noktasından öncesine ait blok gövdelerini tutmaz.
 
 ---
 
-## Step-by-step
+## 2. Firewall'ı aç
 
-### 1. Clone `node-deploy` and configure
+```bash
+sudo ufw allow 30333/tcp   # P2P — internetten erişilebilir olmalı
+sudo ufw allow 22/tcp      # SSH
+sudo ufw enable
+```
 
-`scripts/01_clone_configure.sh` clones the repo and copies `.env.example` to
-`.env`. You then edit `.env` yourself — **do not** script this part blindly,
-since some values are security-sensitive (`VALIDATOR_NODE_KEY`) or
-environment-specific (`METRICS_BIND`).
+`9944` (RPC) veya `9615` (metrics) için kural **ekleme** — monitoring sunucun private network'teyse ve gerçekten `9615`'e ihtiyacı varsa o zaman ekle.
 
-| Variable             | Value                                 | Why                                                          |
-| --------------------- | -------------------------------------- | -------------------------------------------------------------- |
-| `VALIDATOR_NAME`     | anything identifiable                 | Shown on telemetry                                            |
-| `VALIDATOR_NODE_KEY` | `openssl rand -hex 32`                | Your stable libp2p identity                                   |
-| `TELEMETRY_URL`      | leave the default                     | Level `1` publishes your validator address to the dashboard   |
-| `METRICS_BIND`       | your private IP, or `127.0.0.1`       | Default fails closed and exposes nothing                      |
-| `PUBLIC_ADDR`        | **leave empty**                       | Node auto-detects its public address                          |
-| `RESERVED_NODES`     | **leave empty**                       | Not additive — a partial list isolates the node               |
-| `SYNC_MODE`          | **leave empty** unless bootstrapping  | Full sync is the safe default (warp sync only on a fresh volume) |
+---
 
-No bootnodes to add — `testnet-spec.json` already ships with them and the
-Compose file already mounts it.
+## 3. Node'u başlat
 
-### 2. Open the firewall
+```bash
+docker compose pull
+docker compose up -d
+docker compose logs -f orbinum-validator
+```
 
-`scripts/02_firewall.sh` opens **only**:
-- `30333/tcp` — P2P, must be reachable from the internet
-- `22/tcp` — SSH
+Compose dosyası `--validator`, `--no-mdns`, chain spec ve telemetry flag'lerini zaten geçiyor — komut satırına ekleyecek bir şey yok.
 
-Explicitly does **not** open `9944` (RPC) or `9615` (metrics) — those stay
-private per the docs.
+Logların ilk satırları donanım benchmark'ı (kapatma). Ardından node'un kendi peer identity'sini, sonra sync sırasında import mesajlarını göreceksin. Chain head'e ulaşıp idle olana kadar bekle, sonra devam et.
 
-### 3. Start the node
-
-`scripts/03_start_node.sh` runs `docker compose pull`, `up -d`, then tails
-logs. Watch for the peer identity at startup, then import messages, until the
-node reports idling at the chain head.
-
-If you edit `.env` later, you must **recreate**, not restart:
+`.env`'i sonradan değiştirirsen restart değil **recreate** gerekir:
 ```bash
 docker compose up -d --force-recreate orbinum-validator
 ```
 
-### 4. Confirm it is synced
+---
 
-`scripts/04_check_sync.sh` polls `system_health` via `docker exec` (the RPC
-port is only ever reachable at `9944` *inside* the container) until
-`isSyncing` is `false` and `peers >= 2`.
-
-`peers: 0` → check that `30333/tcp` is genuinely reachable from outside and
-that `RESERVED_NODES` is empty.
-
-### 5. Generate session keys
+## 4. Sync durumunu doğrula
 
 ```bash
-./scripts/05_generate_session_keys.sh <YOUR_SS58_ADDRESS>
+docker exec orbinum-validator curl -s -H 'Content-Type: application/json' \
+  -d '{"id":1,"jsonrpc":"2.0","method":"system_health"}' \
+  http://localhost:9944
 ```
 
-Looks up your account's hex public key, then calls
-`author_rotateKeysWithOwner` bound to that account. Must be run **once, on a
-synced node** — running it again generates a new pair and invalidates
-anything already submitted on-chain.
-
-Output has two fields you need for step 6:
-- `keys` — 128 hex chars: Aura (sr25519) + GRANDPA (ed25519) pubkeys, concatenated
-- `proof` — 256 hex chars: one signature per key over your account id
-
-Private key halves stay in the node's keystore
-(`/data/chains/orbinum_testnet/keystore`) and never leave the server.
-
-### 6. Submit `session.setKeys` (manual — Polkadot.js Apps)
-
-This is an on-chain extrinsic, not a CLI step, and must be signed by your
-validator account (the same one used as `owner` in step 5). Fund it from the
-[faucet](https://docs.orbinum.network/getting-started/faucet) first.
-
-1. Open https://polkadot.js.org/apps/ and connect to `wss://rpc-1.testnet.orbinum.io`
-2. **Developer → Extrinsics**
-3. Select your validator account → `session` → `setKeys(keys, proof)`
-4. Paste `keys` and `proof` from step 5
-5. Submit and sign
-
-**Verify:** **Developer → Chain state** → `session.nextKeys(yourAccount)` must
-return the same `keys` you submitted. If empty, the extrinsic didn't finalize
-— step 7 (and `addValidator`) will fail until it does.
-
-> Your validator account is an ordinary account and needs no relationship to
-> your Aura key — that only held for genesis validators.
-
-### 7. Confirm the keystore matches the chain
-
-```bash
-./scripts/07_verify_keystore.sh <KEYS_HEX_FROM_STEP_5>
+Beklenen çıktı:
+```json
+{ "jsonrpc": "2.0", "result": { "peers": 4, "isSyncing": false, "shouldHavePeers": true }, "id": 1 }
 ```
 
-Calls `author_hasSessionKeys`. `true` = this node can sign for the on-chain
-keys, done. `false` = keystore/chain mismatch (e.g. keys were rotated on a
-different machine, or the container volume was recreated) — go back to step 5
-**on this node** and resubmit `setKeys`.
+`isSyncing: false` ve `peers >= 2` görmelisin. `peers: 0` ise `30333/tcp`'nin gerçekten dışarıdan erişilebilir olduğunu ve `RESERVED_NODES`'un boş olduğunu kontrol et.
 
-> **`false` is silent** — no log or telemetry warning. The node just skips
-> every slot it's scheduled for. Always check this before considering setup
-> complete.
+> `docker exec` kullanmamızın sebebi: konteyner içinde RPC portu her zaman `9944`'tür, host'ta `RPC_PORT`'u değiştirmiş olsan bile. Bu port asla internete açık olmamalı — binary her role'de `--rpc-methods Unsafe` zorluyor.
 
 ---
 
-## After this repo: applying to the validator set
+## 5. Session key'leri üret
 
-Once `session.nextKeys` returns your keys and `author_hasSessionKeys` returns
-`true`, you're in the state `addValidator` requires. Next steps (not covered
-here):
+Önce SS58 adresinin hex public key'ini bul:
+```bash
+docker exec orbinum-validator orbinum-node key inspect <SENIN_SS58_ADRESIN>
+```
+Çıktıdaki `Public key (hex)` satırını kopyala (`0x` ile başlayan 64 hex karakter).
+
+Sonra o hex'i owner olarak geçerek key'leri üret ve proof al:
+```bash
+docker exec orbinum-validator curl -s -H 'Content-Type: application/json' \
+  -d '{"id":1,"jsonrpc":"2.0","method":"author_rotateKeysWithOwner","params":["<HESAP_HEX_ADRESIN>"]}' \
+  http://localhost:9944
+```
+
+Beklenen çıktı:
+```json
+{"jsonrpc":"2.0","id":1,"result":{"keys":"0x…","proof":"0x…"}}
+```
+
+- `keys` — 128 hex karakter (64 byte): Aura (sr25519) + GRANDPA (ed25519) pubkey'lerin, runtime'ın belirttiği sırayla
+- `proof` — 256 hex karakter (128 byte): her key için hesabın üzerinden atılmış bir imza
+
+Private key'ler node'un keystore'una (`/data/chains/orbinum_testnet/keystore`) yazılır, sunucudan hiç çıkmaz. Sadece `keys` ve `proof` zincire gidecek.
+
+> **Bu komutu sadece bir kez, senkronize bir node'da çalıştır.** Tekrar çalıştırırsan yeni bir çift üretilir ve daha önce kaydettiğin `keys`/`proof` geçersiz olur. Eğer kaydettikten sonra tekrar rotate edersen, yeni çiftle `session.setKeys`'i tekrar göndermen gerekir yoksa node bir sonraki session'da block üretmeyi durdurur.
+>
+> Çıktıda `proof` alanı **yoksa** node hâlâ sync oluyor demektir — `system_health` `isSyncing: false` deyince tekrar dene.
+
+**`keys` ve `proof`'u kopyala, bir sonraki adımda lazım.**
+
+---
+
+## 6. `session.setKeys` gönder (manuel — Polkadot.js Apps)
+
+Bu, validator hesabınla imzalanan on-chain bir extrinsic — adım 5'te owner olarak verdiğin hesabın aynısı. Önce [faucet](https://docs.orbinum.network/getting-started/faucet)'ten fonla.
+
+1. https://polkadot.js.org/apps/ adresini aç, `wss://rpc-1.testnet.orbinum.io`'ya bağlan
+2. **Developer → Extrinsics**
+3. Validator hesabını seç → `session` → `setKeys(keys, proof)`
+4. Adım 5'teki `keys`'i `keys` alanına yapıştır
+5. Adım 5'teki `proof`'u `proof` alanına yapıştır
+6. Submit ve sign
+
+> Senin hesabın Aura key'in **değil**. Orbinum'da `ValidatorId` doğrudan `AccountId`'dir. Bu ilişki sadece genesis validator'ları için geçerliydi (onların hesapları Aura key'lerinden türetilmişti).
+
+Extrinsic reddedilirse (`Session.InvalidProof`), sebep şunlardan biridir:
+- `proof` boş/`0x00`
+- `setKeys`'i imzalayan hesap, adım 5'te owner olarak verdiğin hesap değil
+- kopyaladıktan sonra tekrar rotate ettin, `keys`/`proof` artık eşleşmiyor
+
+Her durumda çözüm aynı: adım 5'i doğru hesap hex'iyle tekrar yap, yeni `keys`/`proof` ile tekrar gönder.
+
+**Doğrula:** **Developer → Chain state** → `session.nextKeys(hesabın)` sorgula. Gönderdiğin `keys` ile aynı sonucu dönmeli. Boş dönerse extrinsic finalize olmamıştır — sonraki adım başarısız olur, `addValidator` da `NoSessionKeys` ile reddedilir.
+
+---
+
+## 7. Keystore'un zincirle eşleştiğini doğrula
+
+`session.nextKeys` zincirin key'lerini bildiğini kanıtlar ama node'un private key'lerin yarısını **elinde tuttuğunu** kanıtlamaz — `author_rotateKeysWithOwner`'ı başka bir makinede çalıştırdıysan ya da konteyneri volume'suz recreate ettiysen bu ikisi ayrışır.
+
+```bash
+docker exec orbinum-validator curl -s -H 'Content-Type: application/json' \
+  -d '{"id":1,"jsonrpc":"2.0","method":"author_hasSessionKeys","params":["<ADIM_5TEKI_KEYS_HEXI>"]}' \
+  http://localhost:9944
+```
+
+`keys`'i adım 5'ten aldığın gibi tek `0x` string olarak, Aura+GRANDPA birleşik, ayraçsız geç.
+
+Beklenen çıktı:
+```json
+{ "jsonrpc": "2.0", "result": true, "id": 1 }
+```
+
+- `true` → bu node, zincire kayıtlı key'ler için imza atabilir, kurulum tamam.
+- `false` → keystore'da eksik, node hiçbir zaman block üretmeyecek. **Bu durum log'larda, telemetry'de, hiçbir yerde görünmez** — node senkron, peer'lı, sağlıklı görünür ama sırası geldiğinde her seferinde slotu atlar. Adım 5'e dön, **bu node'da** tekrar rotate et, sonra adım 6'yı yeni `keys`/`proof` ile tekrar gönder.
+
+---
+
+## Sonraki adımlar
+
+`session.nextKeys` senin key'lerini dönüyor ve `author_hasSessionKeys` `true` veriyorsa `addValidator`'ın gerektirdiği duruma geldin:
+
 - [Apply to Join the Set](https://docs.orbinum.network/validators/apply)
 - [Relay Setup and Rewards](https://docs.orbinum.network/validators/relay-setup)
-
----
-
-## Notes / gotchas from the docs
-
-- `docker exec` is used for every RPC call because inside the container the
-  RPC port is always `9944`, regardless of what `RPC_PORT` is set to on the
-  host — sidesteps a common source of "connection refused" confusion.
-- The binary forces `--rpc-methods Unsafe` on every role; the RPC port must
-  never be exposed to the internet (Compose only publishes it on loopback).
-- `Session.InvalidProof` on `setKeys` means one of: proof is empty/`0x00`,
-  the signing account isn't the `owner` passed in step 5, or you rotated keys
-  again after copying — the fix is always: redo step 5, resubmit step 6.
-
-## Repo layout
-
-```
-orbinum-validator-ops/
-├── README.md
-└── scripts/
-    ├── 01_clone_configure.sh
-    ├── 02_firewall.sh
-    ├── 03_start_node.sh
-    ├── 04_check_sync.sh
-    ├── 05_generate_session_keys.sh
-    └── 07_verify_keystore.sh
-```
-
-(Step 6 has no script on purpose — it's a manual, signed on-chain action.)
