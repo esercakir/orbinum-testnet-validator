@@ -23,6 +23,26 @@ cd node-deploy/testnet/validator
 cp .env.example .env
 ```
 
+### `.env` dosyasını açmak
+
+Bir terminal editörüyle aç. En kolayı `nano`:
+```bash
+nano .env
+```
+- Kaydetmek için: `Ctrl+O` → `Enter` → çıkmak için: `Ctrl+X`
+- `nano` yoksa: `sudo apt install nano -y`
+
+`vim` tercih edersen:
+```bash
+vim .env
+```
+- `i` ile insert moduna geç, düzenle, `Esc` sonra `:wq` yaz Enter'a bas
+
+Sadece görüntülemek (düzenlemeden) için:
+```bash
+cat .env
+```
+
 `.env` dosyasını aç ve şu değerleri düzenle:
 
 | Değişken | Değer | Neden |
@@ -43,6 +63,12 @@ openssl rand -hex 32
 Bootnode eklemene gerek yok — `testnet-spec.json` zaten hepsini içeriyor ve Compose dosyası zaten mount ediyor.
 
 > **Yeni bir sunucuda acele mi ediyorsun?** `SYNC_MODE=--sync warp` her bloğu tekrar oynatmayı atlar ama **sadece tamamen yeni bir volume'da** kullanılabilir ve node, sync noktasından öncesine ait blok gövdelerini tutmaz.
+
+Düzenlemeyi bitirdikten sonra kontrol için:
+```bash
+cat .env
+```
+Özellikle `PUBLIC_ADDR` ve `RESERVED_NODES`'un boş kaldığından emin ol.
 
 ---
 
